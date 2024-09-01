@@ -14,23 +14,18 @@
 #
 # This script was generated from shunk031/cookiecutter-huggingface-datasets.
 #
-# TODO: Address all TODOs and remove all explanatory comments
-import json
+
 import pathlib
-from dataclasses import asdict, dataclass
-from typing import Any, Dict, List, Tuple, Union
+from dataclasses import dataclass
+from typing import Dict, List, Type
 
 import datasets as ds
 from datasets.utils.logging import get_logger
-from PIL import Image
-from PIL.Image import Image as PilImage
+from hfcocoapi.models import CategoryData, ImageData
+from hfcocoapi.processors import MsCocoProcessor
+from hfcocoapi.tasks.annotation import AnnotationData
+from hfcocoapi.typehint import Bbox, CategoryId, JsonDict
 from tqdm.auto import tqdm
-
-JsonDict = Dict[str, Any]
-ImageId = int
-CategoryId = int
-AnnotationId = int
-Bbox = Tuple[float, float, float, float]
 
 logger = get_logger(__name__)
 
@@ -69,133 +64,145 @@ _URLS = {
     "layout_json": "https://huggingface.co/datasets/shunk031-private/CGL-Dataset-private/resolve/main/layout_json_yinhe.zip",
 }
 
-
-@dataclass
-class ImageData(object):
-    image_id: ImageId
-    file_name: str
-    width: int
-    height: int
-
-    @classmethod
-    def from_dict(cls, json_dict: JsonDict) -> "ImageData":
-        return cls(
-            image_id=json_dict["id"],
-            file_name=json_dict["file_name"],
-            width=json_dict["width"],
-            height=json_dict["height"],
-        )
-
-    @property
-    def shape(self) -> Tuple[int, int]:
-        return (self.height, self.width)
+# The correspondence of the following category names
+# is referred to https://tianchi.aliyun.com/dataset/142692#json-file-structure
+CATEGORIES: Dict[str, str] = {
+    "Logo": "logo",
+    "文字": "text",
+    "衬底": "underlay",
+    "符号元素": "embellishment",
+    "强调突出子部分文字": "highlighted text",
+}
 
 
-@dataclass
-class CategoryData(object):
-    category_id: int
-    name: str
-    supercategory: str
-
-    @classmethod
-    def from_dict(cls, json_dict: JsonDict) -> "CategoryData":
-        return cls(
-            category_id=json_dict["id"],
-            name=json_dict["name"],
-            supercategory=json_dict["supercategory"],
-        )
-
-
-@dataclass
-class AnnotationData(object):
+class CGLAnnotationData(AnnotationData):
     area: float
     bbox: Bbox
     category_id: CategoryId
-    image_id: ImageId
 
-    @classmethod
-    def from_dict(cls, json_dict: JsonDict) -> "AnnotationData":
-        return cls(
-            image_id=json_dict["image_id"],
-            area=json_dict["area"],
-            bbox=json_dict["bbox"],
-            category_id=json_dict["category_id"],
+
+class CGLProcessor(MsCocoProcessor):
+    def get_features_base_dict(self):
+        return {
+            "image_id": ds.Value("int64"),
+            "file_name": ds.Value("string"),
+            "width": ds.Value("int64"),
+            "height": ds.Value("int64"),
+            "image": ds.Image(),
+        }
+
+    def get_features_instance_dict(self, rename_category_names: bool):
+        category_names = (
+            list(CATEGORIES.values())
+            if rename_category_names
+            else list(CATEGORIES.keys())
         )
+        return {
+            "area": ds.Value("int64"),
+            "bbox": ds.Sequence(ds.Value("int64")),
+            "category": {
+                "category_id": ds.Value("int64"),
+                "name": ds.ClassLabel(
+                    num_classes=len(category_names), names=category_names
+                ),
+                "supercategory": ds.Value("string"),
+            },
+        }
+
+    def get_features(self, rename_category_names: bool) -> ds.Features:
+        features_dict = self.get_features_base_dict()
+        annotations = ds.Sequence(
+            self.get_features_instance_dict(
+                rename_category_names=rename_category_names,
+            )
+        )
+        features_dict.update({"annotations": annotations})
+        return ds.Features(features_dict)
+
+    def load_images_data(
+        self,
+        image_dicts: List[JsonDict],
+        image_data_class: Type[ImageData] = ImageData,
+        tqdm_desc: str = "Load images",
+    ) -> List[ImageData]:
+        images = [
+            image_data_class(**image_dict)
+            for image_dict in tqdm(image_dicts, desc=tqdm_desc)
+        ]
+        return images
+
+    def load_categories_data(
+        self,
+        category_dicts: List[JsonDict],
+        category_data_class: Type[CategoryData] = CategoryData,
+        tqdm_desc: str = "Load categories",
+        rename_category_names: bool = False,
+    ) -> Dict[CategoryId, CategoryData]:
+        categories = {}
+        for cat_dict in tqdm(category_dicts, desc=tqdm_desc):
+            if rename_category_names:
+                cat_dict["name"] = CATEGORIES[cat_dict["name"]]
+                cat_dict["supercategory"] = CATEGORIES[cat_dict["supercategory"]]
+            category_data = category_data_class(**cat_dict)
+            categories[category_data.category_id] = category_data
+        return categories
+
+    def load_data(
+        self,
+        ann_dicts: List[List[JsonDict]],
+        tqdm_desc: str = "Load annotation data",
+    ) -> List[List[CGLAnnotationData]]:
+        annotations = [
+            [
+                CGLAnnotationData(id=ann_id, **ann_dict)
+                for ann_id, ann_dict in enumerate(ann_dict_list)
+            ]
+            for ann_dict_list in tqdm(ann_dicts, desc=tqdm_desc)
+        ]
+        return annotations
+
+    def generate_examples(
+        self,
+        images: List[ImageData],
+        annotations: List[List[CGLAnnotationData]],
+        image_files: Dict[str, pathlib.Path],
+        categories: Dict[CategoryId, CategoryData],
+    ):
+        for idx, (img_data, ann_list) in enumerate(zip(images, annotations)):
+            img_path = image_files[img_data.file_name]
+            img = self.load_image(img_path)
+
+            example = img_data.model_dump()
+            example["image"] = img
+
+            example["annotations"] = []
+            for ann in ann_list:
+                ann_dict = ann.model_dump()
+                category = categories[ann.category_id]
+                ann_dict["category"] = category.model_dump()
+                example["annotations"].append(ann_dict)
+
+            yield idx, example
 
 
-def load_imgs_data(
-    img_dicts: List[JsonDict],
-    tqdm_desc="Load images",
-) -> List[ImageData]:
-    images = [
-        ImageData.from_dict(img_dict) for img_dict in tqdm(img_dicts, desc=tqdm_desc)
-    ]
-    return images
-
-
-def load_ann_data(
-    ann_dicts: List[List[JsonDict]],
-    tqdm_desc: str = "Load annotation data",
-) -> List[List[AnnotationData]]:
-    annotations = [
-        [AnnotationData.from_dict(ann_dict) for ann_dict in ann_dict_list]
-        for ann_dict_list in tqdm(ann_dicts, desc=tqdm_desc)
-    ]
-    return annotations
-
-
-def load_categories_data(
-    category_dicts: List[JsonDict],
-    tqdm_desc: str = "Load categories",
-) -> Dict[CategoryId, CategoryData]:
-    categories = {}
-    for category_dict in tqdm(category_dicts, desc=tqdm_desc):
-        category_data = CategoryData.from_dict(category_dict)
-        categories[category_data.category_id] = category_data
-    return categories
-
-
-def load_image(filepath: Union[str, pathlib.Path]) -> PilImage:
-    logger.info(f'Loading image from "{filepath}"')
-    return Image.open(filepath)
-
-
-def load_json(filepath: Union[str, pathlib.Path]) -> JsonDict:
-    logger.info(f'Loading JSON from "{filepath}"')
-    with open(filepath, "r") as f:
-        json_dict = json.load(f)
-    return json_dict
+@dataclass
+class CGLDatasetConfig(ds.BuilderConfig):
+    rename_category_names: bool = False
+    processor: CGLProcessor = CGLProcessor()
 
 
 class CGLDataset(ds.GeneratorBasedBuilder):
     """A class for loading CGL-Dataset dataset."""
 
     VERSION = ds.Version("1.0.0")
-
-    BUILDER_CONFIGS = [
-        ds.BuilderConfig(version=VERSION, description=_DESCRIPTION),
-    ]
+    BUILDER_CONFIG_CLASS = CGLDatasetConfig
+    BUILDER_CONFIGS = [CGLDatasetConfig(version=VERSION, description=_DESCRIPTION)]
 
     def _info(self) -> ds.DatasetInfo:
-        features = ds.Features(
-            {
-                "image_id": ds.Value("int64"),
-                "image": ds.Image(),
-                "file_name": ds.Value("string"),
-                "width": ds.Value("int64"),
-                "height": ds.Value("int64"),
-                "annotations": ds.Sequence(
-                    {
-                        "area": ds.Value("int64"),
-                        "bbox": ds.Sequence(ds.Value("int64")),
-                        "category": {
-                            "category_id": ds.Value("int64"),
-                            "name": ds.Value("string"),
-                            "supercategory": ds.Value("string"),
-                        },
-                    }
-                ),
-            }
+        config: CGLDatasetConfig = self.config  # type: ignore
+        processor = config.processor
+        features = processor.get_features(
+            rename_category_names=config.rename_category_names
         )
         return ds.DatasetInfo(
             description=_DESCRIPTION,
@@ -266,26 +273,25 @@ class CGLDataset(ds.GeneratorBasedBuilder):
     def _generate_examples(
         self, image_files: Dict[str, pathlib.Path], annotation_path: pathlib.Path
     ):
-        ann_json = load_json(annotation_path)
+        config: CGLDatasetConfig = self.config  # type: ignore
+        processor: CGLProcessor = config.processor
 
-        categories = load_categories_data(category_dicts=ann_json["categories"])
+        ann_json = processor.load_annotation_json(annotation_path)
+        categories = processor.load_categories_data(
+            category_dicts=ann_json["categories"],
+            rename_category_names=config.rename_category_names,
+        )
+        images = processor.load_images_data(
+            image_dicts=ann_json["images"],
+        )
+        annotations = processor.load_data(
+            ann_dicts=ann_json["annotations"],
+        )
+        assert len(images) == len(annotations)
 
-        imgs = load_imgs_data(img_dicts=ann_json["images"])
-        anns = load_ann_data(ann_dicts=ann_json["annotations"])
-        assert len(imgs) == len(anns)
-
-        for idx, (img_data, ann_list) in enumerate(zip(imgs, anns)):
-            img_path = image_files[img_data.file_name]
-            img = Image.open(img_path)
-
-            example = asdict(img_data)
-            example["image"] = img
-
-            example["annotations"] = []
-            for ann in ann_list:
-                ann_dict = asdict(ann)
-                category = categories[ann.category_id]
-                ann_dict["category"] = asdict(category)
-                example["annotations"].append(ann_dict)
-
-            yield idx, example
+        yield from processor.generate_examples(
+            images=images,
+            image_files=image_files,
+            categories=categories,
+            annotations=annotations,
+        )
