@@ -254,6 +254,4 @@ If analyses have been run quantifying these biases, please add brief summaries a
 
 ### Contributions
 
-<!-- TODO: Thanks to [@github-username](https://github.com/<github-username>) for adding this dataset. -->
-
 Thanks to [@minzhouGithub](https://github.com/minzhouGithub) for adding this dataset.
