@@ -79,4 +79,4 @@ def test_push_to_hub(
     )
     assert isinstance(dataset, ds.DatasetDict)
 
-    dataset.push_to_hub(repo_id=repo_id, private=True)
+    dataset.push_to_hub(repo_id=repo_id, config_name=subset_name, private=True)
