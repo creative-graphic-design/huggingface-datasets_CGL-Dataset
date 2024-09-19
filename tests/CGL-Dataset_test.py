@@ -31,13 +31,21 @@ def repo_id(org_name: str, dataset_name: str) -> str:
         "we will skip running it on CI."
     ),
 )
+@pytest.mark.parametrize(
+    argnames="subset_name",
+    argvalues=(
+        "default",
+        "ralf",
+    ),
+)
 def test_load_dataset(
     dataset_path: str,
+    subset_name: str,
     expected_num_train: int = 54546,
     expected_num_valid: int = 6002,
     expected_num_test: int = 1000,
 ):
-    dataset = ds.load_dataset(path=dataset_path)
+    dataset = ds.load_dataset(path=dataset_path, name=subset_name, token=True)
     assert isinstance(dataset, ds.DatasetDict)
 
     assert dataset["train"].num_rows == expected_num_train
@@ -52,12 +60,21 @@ def test_load_dataset(
         "we will skip running it on CI."
     ),
 )
+@pytest.mark.parametrize(
+    argnames="subset_name",
+    argvalues=(
+        "default",
+        "ralf",
+    ),
+)
 def test_push_to_hub(
     repo_id: str,
+    subset_name: str,
     dataset_path: str,
 ):
     dataset = ds.load_dataset(
         path=dataset_path,
+        name=subset_name,
         rename_category_names=True,
     )
     assert isinstance(dataset, ds.DatasetDict)
