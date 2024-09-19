@@ -87,14 +87,24 @@ class CGLAnnotationData(AnnotationData):
 
 
 class CGLProcessor(MsCocoProcessor):
-    def get_features_base_dict(self):
-        return {
+    def get_features_base_dict(self, is_ralf_style: bool):
+        base_features = {
             "image_id": ds.Value("int64"),
             "file_name": ds.Value("string"),
             "width": ds.Value("int64"),
             "height": ds.Value("int64"),
-            "image": ds.Image(),
         }
+        image_features = (
+            {
+                "original_poster": ds.Image(),
+                "inpainted_poster": ds.Image(),
+            }
+            if is_ralf_style
+            else {
+                "image": ds.Image(),
+            }
+        )
+        return {**base_features, **image_features}
 
     def get_features_instance_dict(self, rename_category_names: bool):
         category_names = (
@@ -114,8 +124,10 @@ class CGLProcessor(MsCocoProcessor):
             },
         }
 
-    def get_features(self, rename_category_names: bool) -> ds.Features:
-        features_dict = self.get_features_base_dict()
+    def get_features(
+        self, rename_category_names: bool, is_ralf_style: bool
+    ) -> ds.Features:
+        features_dict = self.get_features_base_dict(is_ralf_style)
         annotations = ds.Sequence(
             self.get_features_instance_dict(
                 rename_category_names=rename_category_names,
@@ -203,7 +215,8 @@ def ralf_style_example(
 
     assert len(saliency_testers) == len(saliency_map_cols)
 
-    original_image = example["image"]
+    original_image = example.pop("image")
+    example["original_poster"] = original_image
 
     def get_cgl_layout_elements(
         annotations, image_w: int, image_h: int
@@ -283,7 +296,8 @@ class CGLDataset(ds.GeneratorBasedBuilder):
         config: CGLDatasetConfig = self.config  # type: ignore
         processor = config.processor
         features = processor.get_features(
-            rename_category_names=config.rename_category_names
+            rename_category_names=config.rename_category_names,
+            is_ralf_style=config.name == "ralf",
         )
         return ds.DatasetInfo(
             description=_DESCRIPTION,
